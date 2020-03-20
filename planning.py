@@ -37,13 +37,6 @@ SIDE_NON = 0
 SIDE_POS = 1
 
 
-# Should return the order the bins are to be picked in
-# Will likely be hardcoded
-def order_blocks(block_config):
-    # TODO: Actually compute and return the ordering
-    return block_config
-
-
 # Functions for whether we have met our goal
 # We define them here so we can explicitly write them in wp_queue
 def cf_bounds(minx=float('-inf'), maxx=float('inf'), miny=float('-inf'), maxy=float('inf')):
@@ -54,6 +47,14 @@ def cf_dist(x, y, dist=.05):
     def ret(c):
         return dist**2 >= (c[0]-x)**2 + (c[1]-y)**2
     return ret
+# Functions for whether or not we are near our goal
+def nf_never():
+    def ret(c):
+        return False
+    return ret
+def nf_dist(x, y, dist=.2):
+    # Same function, just changed for readability
+    return cf_dist(x, y, dist)
 
 # A queue for all the waypoints
 # Format is (x, y, direction, doneFunc)
@@ -62,6 +63,19 @@ wp_queue = deque([])
 # To tell the outside world when we are done with our current path
 def wp_done():
     return len(wp_queue) == 0
+
+# Do hysterisys on nearing
+near_hyst = 0
+# To tell the outside world if we are nearing our goal
+def wp_near(cur, HYST_TRIGGER=10):
+    global near_hyst
+
+    if len(wp_queue) > 0 and wp_queue[0][4](cur):
+        near_hyst += 1
+    else:
+        near_hyst = max(0, min(HYST_TRIGGER, near_hyst-1))
+
+    return near_hyst >= HYST_TRIGGER
 
 
 # Utility function to convert between domains
@@ -118,13 +132,18 @@ def compute_wheel_velocities(cur):
 
 
 # Queues driving directly toward a given goal position
-def queue_direct(goal):
+def queue_direct(goal, nf=None):
     global wp_queue
+
+    # Assign the near function if none given
+    if nf == None:
+        nf = nf_never()
 
     # We stop when we are a hardcoded distance away
     wp_queue.append((
         goal[0],  goal[1], DIRECTION_FORWARD,
-        cf_dist(goal[0], goal[1], dist=.01)
+        cf_dist(goal[0], goal[1], dist=.01),
+        nf
     ))
 
 # Queues backing out in a specified direction
@@ -139,7 +158,8 @@ def queue_back(cur, side):
         wp_queue.append((
             cur[0], -.2*sy, DIRECTION_REVERSE,
             cf_bounds(maxy=-.1*sy) if sy > 0 else \
-            cf_bounds(miny=-.1*sy)
+            cf_bounds(miny=-.1*sy),
+            nf_never()
         ))
 
     # If we need to turn in a direction
@@ -148,12 +168,14 @@ def queue_back(cur, side):
         wp_queue.append((
             cur[0], -.2*sy, DIRECTION_REVERSE,
             cf_bounds(maxy=0) if sy > 0 else \
-            cf_bounds(miny=0)
+            cf_bounds(miny=0),
+            nf_never()
         ))
         wp_queue.append((
             cur[0] + side*.30, 0, DIRECTION_REVERSE,
             cf_bounds(minx=cur[0]+side*.20) if side > 0 else \
-            cf_bounds(maxx=cur[0]+side*.20)
+            cf_bounds(maxx=cur[0]+side*.20),
+            nf_never()
         ))
 
 # Queues going into a bin from a certain side
@@ -167,13 +189,14 @@ def queue_turnin(p_bin, side, off):
         wp_queue.append((
             p_bin[0] - side*.07, 0, DIRECTION_FORWARD,
             cf_bounds(maxx=p_bin[0]-side*.05) if side > 0 else \
-            cf_bounds(minx=p_bin[0]-side*.05)
+            cf_bounds(minx=p_bin[0]-side*.05),
+            nf_never()
         ))
 
     # Always actually go into the bin
     # Go just outside, then offset into it
     queue_direct(p_bin)
-    queue_direct(p_bin_off)
+    queue_direct(p_bin_off, nf=nf_dist(p_bin_off[0], p_bin_off[1], dist=.1))
 
 # Queue going to the end position from our current
 def queue_end(cur):
@@ -193,6 +216,9 @@ def queue_end(cur):
 def queue_bin(cur, n, off):
     global wp_queue
 
+    # Make sure to add in the robot's constants
+    off += A_BS + L
+
     # If the index is not a bin, go to end
     if n <= 0 or n >= 11:
         queue_end(cur)
@@ -208,7 +234,7 @@ def queue_bin(cur, n, off):
         # Check if we are already in the correct bin
         # If we are in a bin on the right side and in the right lane
         if abs(cur[1]) > MARGIN_CENTER_BIN and UTIL_SIGN(cur[1]) == UTIL_SIGN(p_bin[1]) and abs(cur[0]-p_bin[0]) <= SAME_BIN_MARGIN_X:
-            queue_direct(p_bin)
+            queue_direct(p_bin, nf=nf_dist(p_bin[0], p_bin[1], dist=.1))
         else:
             # Only back up if we need to
             if abs(cur[1]) > MARGIN_CENTER_BIN:
